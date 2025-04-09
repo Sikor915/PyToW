@@ -10,17 +10,93 @@ class PythonToWTranspiler(ast.NodeVisitor):
     def __init__(self):
         self.instructions = []
         self.variables = {}
+        self.temp_counter = 0
         self.label_counter = 0
         self.for_label_counter = 0
         self.table_invoke_counter = 0
         self.varDict = {}
         self.arrays = {}
         self.strings = {}
+        self.temps = {}
+
+    def resolve_operand_label(self, expr):
+        if isinstance(expr, ast.Constant):
+            label = self.get_label(expr.value)
+            self.varDict[label] = expr.value
+            return label, []
+        elif isinstance(expr, ast.Name):
+            return self.get_label(expr.id), []
+        elif isinstance(expr, ast.BinOp):
+            temp_result = self.get_new_temp_label()
+            binop_code = self.translate_binop(expr, temp_result)
+            return temp_result, binop_code
+        elif isinstance(expr, ast.Subscript):
+            # Resolve tab[i] or tab[i-1]
+            array_label = "var_" + expr.value.id
+            index = expr.slice
+            index_code = []
+            if isinstance(index, ast.Constant):
+                index_label = self.get_new_temp_label()
+                self.varDict[index_label] = index.value
+            elif isinstance(index, ast.Name):
+                index_label = self.get_label(index.id)
+            elif isinstance(index, ast.BinOp):
+                index_label = self.get_new_temp_label()
+                index_code = self.translate_binop(index, index_label)
+            else:
+                raise NotImplementedError(f"Unsupported subscript index: {ast.dump(index)}")
+
+            addr_label = self.get_new_table_invoke_label(array_label)
+            temp_addr_label = f"{addr_label}Temp"
+            if temp_addr_label not in self.varDict:
+                self.varDict[temp_addr_label] = 0
+
+            access_code = index_code + [
+                f"pob {addr_label}",
+                f"ład {temp_addr_label}",
+                f"dod {index_label}",
+                f"ład {addr_label}",
+                f"{addr_label}: pob {array_label}"
+            ]
+            result_label = self.get_new_temp_label()
+            if result_label not in self.varDict:
+                self.varDict[result_label] = None
+            access_code.append(f"ład {result_label}")
+            access_code.append(f"pob {temp_addr_label}")
+            access_code.append(f"ład {addr_label}")
+            return result_label, access_code
+        else:
+            raise NotImplementedError(f"Unsupported operand type: {ast.dump(expr)}")
+
+    def translate_binop(self, binop_node, result_label):
+        left_label, left_code = self.resolve_operand_label(binop_node.left)
+        right_label, right_code = self.resolve_operand_label(binop_node.right)
+        op_map = {
+            ast.Add: "dod",
+            ast.Sub: "ode",
+            ast.Mult: "mno",
+            ast.Div: "dzi"
+        }
+        op_instr = op_map[type(binop_node.op)]
+        code = left_code + right_code
+        code += [
+            f"pob {left_label}",
+            f"{op_instr} {right_label}",
+            f"ład {result_label}"
+        ]
+        return code
 
     def get_label(self, var_name):
         if var_name not in self.variables:
             self.variables[var_name] = f"var_{var_name}"
         return self.variables[var_name]
+
+    def get_new_temp_label(self):
+        label = f"temp_{self.temp_counter}"
+        if label not in self.temps:
+            self.temps[label] = None
+        self.temp_counter += 1
+        return label
 
     def new_label(self):
         label = f"L{self.label_counter}"
@@ -51,6 +127,9 @@ class PythonToWTranspiler(ast.NodeVisitor):
             else:
                 self.instructions.append(f"{label}: rpa")
 
+        for label, value in self.temps.items():
+            self.instructions.append(f"{label}: rpa")
+
         for base_label, char_list in self.strings.items():
             self.instructions.append(f"{base_label}: rst '{char_list[0]}'")
             for ch in char_list[1:]:
@@ -80,20 +159,28 @@ class PythonToWTranspiler(ast.NodeVisitor):
         elif isinstance(node.value, ast.BinOp):
             # DODAJ OBSŁUGĘ OPERACJI W STYLU x = tab[i] + tab[j]   ------------------------------------------------------
             # TO BĘDZIE WYMAGAŁO SPOREJ PRZEBUDOWY TEJ CZĘSCI KODU ------------------------------------------------------
-            left_label = self.get_operand_label(node.value.left)
-            right_label = self.get_operand_label(node.value.right)
+#            left_label = self.get_operand_label(node.value.left)
+#            right_label = self.get_operand_label(node.value.right)
+#            result_label = self.get_label(node.targets[0].id)
+#            if result_label not in self.varDict: self.varDict[result_label] = None
+#            op_map = {
+#                ast.Add: "dod",
+#                ast.Sub: "ode",
+#                ast.Mult: "mno",
+#                ast.Div: "dzi"
+#            }
+#            op_instr = op_map[type(node.value.op)]
+#            self.instructions.append(f"pob {left_label}")
+#            self.instructions.append(f"{op_instr} {right_label}")
+#            self.instructions.append(f"ład {result_label}")
+
             result_label = self.get_label(node.targets[0].id)
-            if result_label not in self.varDict: self.varDict[result_label] = None
-            op_map = {
-                ast.Add: "dod",
-                ast.Sub: "ode",
-                ast.Mult: "mno",
-                ast.Div: "dzi"
-            }
-            op_instr = op_map[type(node.value.op)]
-            self.instructions.append(f"pob {left_label}")
-            self.instructions.append(f"{op_instr} {right_label}")
-            self.instructions.append(f"ład {result_label}")
+            if result_label not in self.varDict:
+                self.varDict[result_label] = None
+            binop_code = self.translate_binop(node.value, result_label)
+            for element in binop_code:
+                self.instructions.append(element)
+
         elif isinstance(node.value, ast.List):
             base_label = self.get_label(node.targets[0].id)
             values = []
@@ -297,6 +384,13 @@ class PythonToWTranspiler(ast.NodeVisitor):
             elif isinstance(node.value.args[0], ast.Name):
                 append_value = node.value.args[0].id
                 append_label = self.get_label(append_value)
+            elif isinstance(node.value.args[0], ast.BinOp):
+                append_value = node.value.args[0]
+                append_label = self.get_new_temp_label()
+                binop_code = self.translate_binop(append_value, append_label)
+                for element in binop_code:
+                    self.instructions.append(element)
+
 
             self.instructions.append(f"pob {addr_label}")
             self.instructions.append(f"ład {temp_addr_label}")
@@ -415,14 +509,13 @@ class PythonToWTranspiler(ast.NodeVisitor):
 
 # Example usage
 source_code = """
-n = 3
-fib = [0, 1]
-if n > 2:
-    for i in range (2, n):
-        old = fib[i-1]
-        new = fib[i]
-        curr = fib[i+2]
+n = 4
+fib = [1, 1]
+for i in range(2, n):
+    fib.append(fib[i-1] + fib[i-2])
 """
+
+table = [0,0,0,0]
 
 transpiler = PythonToWTranspiler()
 w_code = transpiler.transpile(source_code)
