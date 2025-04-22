@@ -1,7 +1,7 @@
 import ast
 
 # Need to add:
-# - arrays - proper implementation with iterating over the array
+# - arrays - I think it works?
 # - proper I/O (input, print) - it needs to be something like out_<var>: rst'<value>'
 # - strings - don't know what to do with them, the code can print them right now but nothing else really
 # - stack implementation - functions and things of that nature
@@ -15,6 +15,7 @@ class PythonToWTranspiler(ast.NodeVisitor):
         self.for_label_counter = 0
         self.table_invoke_counter = 0
         self.varDict = {}
+        self.outDict = {}
         self.arrays = {}
         self.strings = {}
         self.temps = {}
@@ -59,8 +60,8 @@ class PythonToWTranspiler(ast.NodeVisitor):
                 f"{addr_label}: pob {array_label}"
             ]
             result_label = self.get_new_temp_label()
-            if result_label not in self.varDict:
-                self.varDict[result_label] = None
+            #if result_label not in self.varDict:
+            #    self.varDict[result_label] = None
             access_code.append(f"ład {result_label}")
             access_code.append(f"pob {temp_addr_label}")
             access_code.append(f"ład {addr_label}")
@@ -90,6 +91,9 @@ class PythonToWTranspiler(ast.NodeVisitor):
         if var_name not in self.variables:
             self.variables[var_name] = f"var_{var_name}"
         return self.variables[var_name]
+
+    def get_out_label(self, out_name):
+        return f"out_{out_name}"
 
     def get_new_temp_label(self):
         label = f"temp_{self.temp_counter}"
@@ -127,6 +131,12 @@ class PythonToWTranspiler(ast.NodeVisitor):
             else:
                 self.instructions.append(f"{label}: rpa")
 
+        for label, value in self.outDict.items():
+            if(value is not None):
+                self.instructions.append(f"{label}: rst {value}")
+            else:
+                self.instructions.append(f"{label}: rpa")
+
         for label, value in self.temps.items():
             self.instructions.append(f"{label}: rpa")
 
@@ -158,28 +168,58 @@ class PythonToWTranspiler(ast.NodeVisitor):
                 self.varDict[base_label + "Size_temp"] = 0
         elif isinstance(node.value, ast.BinOp):
             # DODAJ OBSŁUGĘ OPERACJI W STYLU x = tab[i] + tab[j]   ------------------------------------------------------
-            # TO BĘDZIE WYMAGAŁO SPOREJ PRZEBUDOWY TEJ CZĘSCI KODU ------------------------------------------------------
-#            left_label = self.get_operand_label(node.value.left)
-#            right_label = self.get_operand_label(node.value.right)
-#            result_label = self.get_label(node.targets[0].id)
-#            if result_label not in self.varDict: self.varDict[result_label] = None
-#            op_map = {
-#                ast.Add: "dod",
-#                ast.Sub: "ode",
-#                ast.Mult: "mno",
-#                ast.Div: "dzi"
-#            }
-#            op_instr = op_map[type(node.value.op)]
-#            self.instructions.append(f"pob {left_label}")
-#            self.instructions.append(f"{op_instr} {right_label}")
-#            self.instructions.append(f"ład {result_label}")
+            left_label, left_code = self.resolve_operand_label(node.value.left)
+            right_label, right_code = self.resolve_operand_label(node.value.right)
 
-            result_label = self.get_label(node.targets[0].id)
-            if result_label not in self.varDict:
-                self.varDict[result_label] = None
-            binop_code = self.translate_binop(node.value, result_label)
-            for element in binop_code:
+            op_map = {
+                ast.Add: "dod",
+                ast.Sub: "ode",
+                ast.Mult: "mno",
+                ast.Div: "dzi"
+            }
+            op_instr = op_map[type(node.value.op)]
+
+            for element in left_code:
                 self.instructions.append(element)
+            for element in right_code:
+                self.instructions.append(element)
+
+            if isinstance(node.targets[0], ast.Name): result_label = self.get_label(node.targets[0].id)
+            elif isinstance(node.targets[0], ast.Subscript):
+                array_name = self.get_label(node.targets[0].value.id)
+                if isinstance(node.targets[0].slice, ast.Constant):
+                    index_expr = node.targets[0].slice.value
+                else:
+                    index_expr = node.targets[0].slice.id
+
+                addr_label = self.get_new_table_invoke_label(array_name)
+                temp_addr_label = f"{addr_label}Temp"
+                if temp_addr_label not in self.varDict: self.varDict[temp_addr_label] = 0
+                index_label = self.get_label(index_expr)
+
+                self.instructions.append(f"pob {addr_label}")
+                self.instructions.append(f"ład {temp_addr_label}")
+                self.instructions.append(f"dod {index_label}")
+                self.instructions.append(f"ład {addr_label}")
+                self.instructions.append(f"pob {left_label}")
+                self.instructions.append(f"{op_instr} {right_label}")
+                self.instructions.append(f"{addr_label}: ład {array_name}")
+                self.instructions.append(f"pob {temp_addr_label}")
+                self.instructions.append(f"ład {addr_label}")
+                return
+
+            if result_label not in self.varDict: self.varDict[result_label] = None
+
+            self.instructions.append(f"pob {left_label}")
+            self.instructions.append(f"{op_instr} {right_label}")
+            self.instructions.append(f"ład {result_label}")
+
+#            result_label = self.get_label(node.targets[0].id)
+#            if result_label not in self.varDict:
+#                self.varDict[result_label] = None
+#            binop_code = self.translate_binop(node.value, result_label)
+#            for element in binop_code:
+#                self.instructions.append(element)
 
         elif isinstance(node.value, ast.List):
             base_label = self.get_label(node.targets[0].id)
@@ -203,7 +243,7 @@ class PythonToWTranspiler(ast.NodeVisitor):
             self.instructions.append(f"ład {target_label}")
         elif isinstance(node.targets[0], ast.Subscript):
             array_name = "var_" + node.targets[0].value.id
-            if node.targets[0].slice is ast.Constant:
+            if isinstance(node.targets[0].slice, ast.Constant):
                 index_expr = node.targets[0].slice.value
             else:
                 index_expr = node.targets[0].slice.id
@@ -218,6 +258,7 @@ class PythonToWTranspiler(ast.NodeVisitor):
             value_label = self.get_label(value_expr)
             index_label = self.get_label(index_expr)
             if value_label not in self.varDict: self.varDict[value_label] = value_expr
+            if index_label not in self.varDict and isinstance(node.targets[0].slice, ast.Constant): self.varDict[index_label] = index_expr
 
             self.instructions.append(f"pob {addr_label}")
             self.instructions.append(f"ład {temp_addr_label}")
@@ -275,13 +316,21 @@ class PythonToWTranspiler(ast.NodeVisitor):
             self.instructions.append(f"ład {target_label}")
             self.instructions.append(f"pob {temp_addr_label}")
             self.instructions.append(f"ład {addr_label}")
-
+        elif isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name) and node.value.func.id == "input":
+            input_label = self.get_label(node.targets[0].id)
+            if input_label not in self.varDict: self.varDict[input_label] = None
+            self.instructions.append(f"wpr 1")
+            self.instructions.append(f"ład {input_label}")
         else:
             raise NotImplementedError("Unsupported assignment operation.")
 
     def visit_AugAssign(self, node):
         target_label = self.get_label(node.target.id)
-        right_label = self.get_operand_label(node.value)
+        right_label, right_code = self.resolve_operand_label(node.value)
+
+        for element in right_code:
+            self.instructions.append(element)
+
         op_map = {
             ast.Add: "dod",
             ast.Sub: "ode",
@@ -294,8 +343,14 @@ class PythonToWTranspiler(ast.NodeVisitor):
         self.instructions.append(f"ład {target_label}")
 
     def visit_Compare(self, node):
-        left_label = self.get_operand_label(node.left)
-        right_label = self.get_operand_label(node.comparators[0])
+        left_label, left_code = self.resolve_operand_label(node.left)
+        right_label, right_code = self.resolve_operand_label(node.comparators[0])
+
+        for element in left_code:
+            self.instructions.append(element)
+        for element in right_code:
+            self.instructions.append(element)
+
         self.instructions.append(f"pob {left_label}")
         self.instructions.append(f"ode {right_label}")
 
@@ -362,11 +417,30 @@ class PythonToWTranspiler(ast.NodeVisitor):
                     self.instructions.append(f"pob {size_label}")
                     self.instructions.append(f"ład {size_label_temp}")
                     self.generate_read_table(label, size_label_temp)
-
+                elif label in self.arrays:
+                    size_label = self.get_label(var_name + "Size")
+                    size_label_temp = self.get_label(var_name + "Size_temp")
+                    self.instructions.append(f"pob {size_label}")
+                    self.instructions.append(f"ład {size_label_temp}")
+                    self.generate_read_table(label, size_label_temp)
+                #elif label in self.varDict:
+                    # Need to think about this more.
                 else:
                     self.instructions.append(f"pob {label}")
                     self.instructions.append("wyp 2")
-            else:
+            elif isinstance(arg, ast.Constant):
+                stringToPrint = arg.value
+                for ch in stringToPrint:
+                    char_label = self.get_out_label("Big" + ch) if ch.isupper() else self.get_out_label(ch)
+                    if char_label not in self.outDict: self.outDict[char_label] = f'\'{ch}\''
+                    self.instructions.append(f"pob {char_label}")
+                    self.instructions.append("wyp 2")
+            elif isinstance(arg, ast.BinOp):
+                temp_result = self.get_new_temp_label()
+                binop_code = self.translate_binop(arg, temp_result)
+                for element in binop_code:
+                    self.instructions.append(element)
+                self.instructions.append(f"pob {temp_result}")
                 self.instructions.append("wyp 2")
         elif isinstance(node.value.func, ast.Attribute) and node.value.func.attr == "append":
             array_name = "var_" + node.value.func.value.id
@@ -405,16 +479,6 @@ class PythonToWTranspiler(ast.NodeVisitor):
             self.instructions.append(f"ład {addr_label}")
         else:
             raise NotImplementedError("Unsupported expression type.")
-
-    def get_operand_label(self, operand):
-        if isinstance(operand, ast.Constant):
-            label = self.get_label(operand.value)
-            self.varDict[label] = operand.value
-            return label
-        elif isinstance(operand, ast.Name):
-            return self.get_label(operand.id)
-        else:
-            raise NotImplementedError("Unsupported operand type.")
 
     def get_for_label(self, operand):
         if isinstance(operand, ast.Constant):
@@ -486,12 +550,25 @@ class PythonToWTranspiler(ast.NodeVisitor):
 
         var_1 = "var_1"
         self.varDict[var_1] = 1
+        digitChecker = False
 
         loop_label = self.new_label()
         end_label = self.new_label()
 
         self.instructions.append(f"{loop_label}:")
         self.instructions.append(f"pob {base_label}")
+        if base_label in self.arrays:
+            digitChecker = True
+            for s in self.arrays[base_label]:
+                try:
+                    int(s)
+                except:
+                    digitChecker = False
+                    break
+        if digitChecker:
+            var_48 = "var_48"
+            self.varDict[var_48] = 48
+            self.instructions.append(f"dod {var_48}")
         self.instructions.append("wyp 2")
 
         self.instructions.append(f"pob {size_label}")
@@ -506,17 +583,18 @@ class PythonToWTranspiler(ast.NodeVisitor):
 
         self.instructions.append(f"sob {loop_label}")
         self.instructions.append(f"{end_label}:")
-
-# Example usage
+# 49[W] - 1[Normal]
+# 65[W] - A[Normal]
+# 97[W] - a[Normal]
 source_code = """
 n = 4
-fib = [1, 1]
-for i in range(2, n):
-    fib.append(fib[i-1] + fib[i-2])
+tab = [1, 2, 3, 4]
+string = "Hello"
+print(string)
+print(tab)
+print((1+2)/n)
+n = input()
 """
-
-table = [0,0,0,0]
-
 transpiler = PythonToWTranspiler()
 w_code = transpiler.transpile(source_code)
 print(w_code)
