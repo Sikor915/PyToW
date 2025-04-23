@@ -423,24 +423,44 @@ class PythonToWTranspiler(ast.NodeVisitor):
                     self.instructions.append(f"pob {size_label}")
                     self.instructions.append(f"ład {size_label_temp}")
                     self.generate_read_table(label, size_label_temp)
-                #elif label in self.varDict:
-                    # Need to think about this more.
+                elif label in self.varDict:
+                    # Need to think about this more. What was this about? Printing vars? Numbers should be easy.
+                    # Add code to read multi-digit numbers
+                    self.instructions.append(f"pob {label}")
+                    digitchecker = False
+                    if isinstance(self.varDict[label], int):
+                        digitchecker = True
+                    if digitchecker:
+                        var_48 = self.get_label("Out0")
+                        self.varDict[var_48] = 48
+                        numString = str(self.varDict[label])
+                        for ch in numString:
+                            char_label = self.get_out_label(ch)
+                            if char_label not in self.outDict: self.outDict[char_label] = f'\'{ch}\''
+                            self.instructions.append(f"pob {char_label}")
+                            self.instructions.append("wyp 2")
+                        self.instructions.append(f"dod {var_48}")
+                        self.instructions.append("wyp 2")
                 else:
                     self.instructions.append(f"pob {label}")
                     self.instructions.append("wyp 2")
             elif isinstance(arg, ast.Constant):
-                stringToPrint = arg.value
+                stringToPrint = str(arg.value)
                 for ch in stringToPrint:
                     char_label = self.get_out_label("Big" + ch) if ch.isupper() else self.get_out_label(ch)
                     if char_label not in self.outDict: self.outDict[char_label] = f'\'{ch}\''
                     self.instructions.append(f"pob {char_label}")
                     self.instructions.append("wyp 2")
             elif isinstance(arg, ast.BinOp):
+                #Add code to read multi-digit numbers
                 temp_result = self.get_new_temp_label()
                 binop_code = self.translate_binop(arg, temp_result)
                 for element in binop_code:
                     self.instructions.append(element)
+                var_48 = self.get_label("Out0")
+                self.varDict[var_48] = 48
                 self.instructions.append(f"pob {temp_result}")
+                self.instructions.append(f"dod {var_48}")
                 self.instructions.append("wyp 2")
         elif isinstance(node.value.func, ast.Attribute) and node.value.func.attr == "append":
             array_name = "var_" + node.value.func.value.id
@@ -546,8 +566,15 @@ class PythonToWTranspiler(ast.NodeVisitor):
         self.instructions.append(f"sob {loop_start}")
         self.instructions.append(f"{label_false}:")
 
+    def visit_Module(self, node):
+        # Visit the module node and process its body --- THIS NEEDS TO HAPPEN AFTER THE STP INSTRUCTION
+        for stmt in node.body:
+            self.visit(stmt)
+        return self.instructions
+
     def generate_read_table(self, base_label, size_label):
 
+        #Add code to read multi-digit numbers
         var_1 = "var_1"
         self.varDict[var_1] = 1
         digitChecker = False
@@ -566,7 +593,7 @@ class PythonToWTranspiler(ast.NodeVisitor):
                     digitChecker = False
                     break
         if digitChecker:
-            var_48 = "var_48"
+            var_48 = self.get_label("Out0")
             self.varDict[var_48] = 48
             self.instructions.append(f"dod {var_48}")
         self.instructions.append("wyp 2")
@@ -587,12 +614,12 @@ class PythonToWTranspiler(ast.NodeVisitor):
 # 65[W] - A[Normal]
 # 97[W] - a[Normal]
 source_code = """
-n = 4
-tab = [1, 2, 3, 4]
-string = "Hello"
-print(string)
-print(tab)
-print((1+2)/n)
+def f(x):
+    return x + 1
+
+n = 123
+print(n)
+print(999)
 n = input()
 """
 transpiler = PythonToWTranspiler()
